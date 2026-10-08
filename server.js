@@ -1,12 +1,26 @@
 const express = require('express');
 const cors = require('cors');
-// Cambiamos 'firebase-admin' por 'firebase-admin/app' y 'firebase-admin/firestore'
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const webpush = require('web-push');
 
-// 1. Cargar las credenciales de Firebase
-const serviceAccount = require('./serviceAccountKey.json');
+// 1. Cargar las credenciales de Firebase (Soporte Base64 para Render o Archivo Local)
+let serviceAccount;
+
+if (process.env.FIREBASE_CREDENTIALS_BASE64) {
+  // Producción en Render: Decodificar Base64 de forma limpia y segura
+  const jsonDecodificado = Buffer.from(process.env.FIREBASE_CREDENTIALS_BASE64, 'base64').toString('utf-8');
+  serviceAccount = JSON.parse(jsonDecodificado);
+} else if (process.env.FIREBASE_CREDENTIALS) {
+  // Alternativa por si usas la variable estándar
+  serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+  if (serviceAccount.private_key) {
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+  }
+} else {
+  // Entorno de Desarrollo Local
+  serviceAccount = require('./serviceAccountKey.json');
+}
 
 // 2. Inicializar Firebase Admin y Firestore
 initializeApp({
@@ -49,7 +63,7 @@ app.post('/api/guardar-suscripcion', async (req, res) => {
     res.status(201).json({ status: 'Éxito', id: docRef.id });
   } catch (error) {
     console.error('Error al guardar en Firestore:', error);
-    res.status(500).json({ error: 'No se pudo guardar la suscripción' });
+    res.status(500).json({ error: 'No se pudo guardar la suscripción', detalle: error.message });
   }
 });
 
@@ -58,8 +72,8 @@ app.post('/api/enviar-notificacion-todos', async (req, res) => {
   const { titulo, mensaje, url } = req.body;
 
   const payload = JSON.stringify({
-    title: titulo || 'Notificación PWA',
-    body: mensaje || '¡Tienes un nuevo mensaje!',
+    titulo: titulo || 'Notificación PWA',
+    mensaje: mensaje || '¡Tienes un nuevo mensaje!',
     url: url || '/'
   });
 
@@ -72,15 +86,17 @@ app.post('/api/enviar-notificacion-todos', async (req, res) => {
     }
 
     // Enviar la notificación a cada usuario
-    const promesasEnvio = snapshot.docs.map(doc => {
+    const promesasEnvio = snapshot.docs.map(async (doc) => {
       const datosDoc = doc.data();
-      return webpush.sendNotification(datosDoc.suscripcion, payload)
-        .catch(err => {
-          console.error(`Error enviando a ID ${doc.id}:`, err.message);
-          if (err.statusCode === 410 || err.statusCode === 404) {
-            db.collection('suscripciones').doc(doc.id).delete();
-          }
-        });
+      try {
+        await webpush.sendNotification(datosDoc.suscripcion, payload);
+      } catch (err) {
+        console.error(`Error enviando a ID ${doc.id}:`, err.message);
+        // Si la suscripción expiró o ya no es válida, la removemos de la base de datos
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          await db.collection('suscripciones').doc(doc.id).delete();
+        }
+      }
     });
 
     await Promise.all(promesasEnvio);
@@ -88,11 +104,11 @@ app.post('/api/enviar-notificacion-todos', async (req, res) => {
     res.json({ status: 'Notificaciones enviadas a todos los usuarios' });
   } catch (error) {
     console.error('Error enviando notificaciones:', error);
-    res.status(500).json({ error: 'Error al procesar el envío' });
+    res.status(500).json({ error: 'Error al procesar el envío', detalle: error.message });
   }
 });
 
-// Iniciar el servidor en el puerto 3000
+// Iniciar el servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor backend escuchando en http://localhost:${PORT}`);
